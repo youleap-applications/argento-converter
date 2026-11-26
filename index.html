@@ -94,7 +94,8 @@ const DEFAULT_TRANSLATIONS = {
   // צבע האבן (נגזר מהספרה בקוד ARG)
   stone_colors: {
     "plain": "ללא אבן",
-    "white": "לבן",
+    // "שקוף" ולא "לבן" - כך מופיע צבע האבן במדוזה בכל המוצרים הקיימים
+    "white": "שקוף",
     "blue": "כחול",
     "green": "ירוק",
     "black": "שחור",
@@ -190,7 +191,13 @@ function mergeTranslations(stored, defaults) {
 function loadStoredTranslations() {
   try {
     const raw = localStorage.getItem(TRANSLATIONS_STORAGE_KEY);
-    if (raw) return mergeTranslations(JSON.parse(raw), DEFAULT_TRANSLATIONS);
+    if (raw) {
+      const stored = JSON.parse(raw);
+      // המילון נשמר בדפדפן בכל טעינה, כולל ערכי ברירת המחדל, וגובר על הקוד - ערך ברירת מחדל ישן
+      // שלא נערך ידנית מוחלף בחדש (לבן -> שקוף)
+      if (stored.stone_colors && stored.stone_colors.white === "לבן") stored.stone_colors.white = "שקוף";
+      return mergeTranslations(stored, DEFAULT_TRANSLATIONS);
+    }
   } catch (e) {
     // localStorage לא זמין / JSON פגום - חוזרים לברירת המחדל
   }
@@ -490,6 +497,16 @@ function buildFolderImageMap(imageFiles) {
   return map;
 }
 
+// מפתח התמונה בתיקייה של שורה: לפי הקוד שלה, ואם אין - לפי הקוד הישן שלה (הספק שולח לפעמים
+// תמונות של צבע חדש בשם הקוד הישן, למשל B1000546-3-1 לשורה 100006B3115). null = אין תמונה
+function folderImageKeyFor(row, folderImageMap) {
+  if (!folderImageMap) return null;
+  if (folderImageMap.has(row.image_key)) return row.image_key;
+  const old = String(row.old_code_raw ?? "").trim().replace(/^\*/, "").toUpperCase().match(CODE_RE);
+  const oldKey = old && `${old[2]}${old[3]}-${old[4]}-${old[5]}`;
+  return oldKey && folderImageMap.has(oldKey) ? oldKey : null;
+}
+
 // דגמים חוזרים (שורות עם קוד ישן) כבר קיימים במדוזה - משם לוקחים שם, תיאור, קטגוריות ותמונה,
 // כדי שלא ימלאו אותם שוב. קריאה בלבד מה-Store API עם ה-publishable key (ציבורי מעצם הגדרתו).
 // עובד רק כשהממיר נטען מכתובת שמאושרת ב-STORE_CORS (ה-CloudFront של ארג'נטו)
@@ -703,6 +720,9 @@ async function buildWorkbook(allParsed, allErrors, translations, folderImageMap,
   wsVariants.getColumn(colIdx("image")).width = 28;
   wsVariants.getColumn(colIdx("product_name")).width = 26;
   wsVariants.getColumn(colIdx("description_free")).width = 36;
+  // טקסט עברי עם "14K" או מספרים: בלי כיוון מפורש Google Sheets מציג אותו משמאל לימין והמילים מתערבבות
+  wsVariants.getColumn(colIdx("product_name")).alignment = { readingOrder: "rtl" };
+  wsVariants.getColumn(colIdx("description_free")).alignment = { readingOrder: "rtl" };
 
   const imgColLetter = wsVariants.getColumn(colIdx("image")).letter;
   const imageStats = { fromFolder: 0, fromMedusa: 0, fromSourceFallback: 0, notFound: 0, unsupportedFormat: [] };
@@ -714,19 +734,20 @@ async function buildWorkbook(allParsed, allErrors, translations, folderImageMap,
   const sourceImageIdCache = new Map();
 
   async function resolveFolderImageId(row) {
-    const folderFile = folderImageMap && folderImageMap.get(row.image_key);
-    if (!folderFile) return { imageId: null, folderFile: null };
-    if (folderImageIdCache.has(row.image_key)) {
-      return { imageId: folderImageIdCache.get(row.image_key), folderFile };
+    const key = folderImageKeyFor(row, folderImageMap);
+    if (!key) return { imageId: null, folderFile: null };
+    const folderFile = folderImageMap.get(key);
+    if (folderImageIdCache.has(key)) {
+      return { imageId: folderImageIdCache.get(key), folderFile };
     }
     const prepared = await prepareImageForEmbedding(folderFile);
     if (!prepared || !prepared.buffer || !prepared.buffer.byteLength) {
       imageStats.unsupportedFormat.push(folderFile.name);
-      folderImageIdCache.set(row.image_key, null);
+      folderImageIdCache.set(key, null);
       return { imageId: null, folderFile };
     }
     const imageId = wb.addImage({ buffer: prepared.buffer, extension: prepared.extension });
-    folderImageIdCache.set(row.image_key, imageId);
+    folderImageIdCache.set(key, imageId);
     return { imageId, folderFile };
   }
 
@@ -1041,7 +1062,7 @@ function App() {
         allErrors = allErrors.concat(errors);
 
         // חילוץ תמונות מהקובץ המקורי (ExcelJS, כבד) נעשה רק אם יש שורה שלא נמצאה לה תמונה בתיקייה
-        const needsSourceFallback = parsed.some((row) => !folderImageMap.has(row.image_key));
+        const needsSourceFallback = parsed.some((row) => !folderImageKeyFor(row, folderImageMap));
         if (needsSourceFallback) {
           const fileImages = await extractSourceImages(buf);
           fileImages.forEach((v, k) => sourceImagesMap.set(`${file.name}::${k}`, v));
